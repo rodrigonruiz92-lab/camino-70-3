@@ -10,7 +10,7 @@ App web gratuita (PWA) para seguir un plan de Ironman 70.3: qué toca hoy, regis
 
 **Opción A (para todos los que usan la app):** agregar un objeto a `weeks` en `plan.js` y volver a publicar.
 
-**Opción B (cada usuario):** Ajustes → "Copiar prompt" → pegarlo en ChatGPT/Claude con el PDF de la semana → pegar el JSON en "Importar semana".
+**Opción B (cada usuario):** Ajustes → "Subir PDF de la semana". La app lee el PDF en el navegador (pdf.js), detecta días, deportes, duraciones y bloques, muestra una pantalla de revisión editable y guarda la semana. Si el formato del PDF no se reconoce, en "Otras opciones" está el prompt para convertirlo a JSON con ChatGPT/Claude.
 
 ## Correr localmente
 

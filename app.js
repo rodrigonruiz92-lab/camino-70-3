@@ -436,6 +436,14 @@ function renderToday() {
 
     ${noteForToday(t)}
 
+    ${(parse(t).getDay() + 6) % 7 >= 4 && !sessionsInWeek(addDays(mondayOf(t), 7)).length ? `
+      <div class="alert info" style="margin-top:14px"><span>📄</span>
+        <div style="flex:1"><b>¿Ya tenés el plan de la semana que viene?</b>
+          <div class="small" style="margin:2px 0 8px">Subí el PDF y queda listo para el lunes.</div>
+          ${pdfButton('📄 Subir PDF', 'btn sm primary')}
+        </div>
+      </div>` : ''}
+
     ${tomorrow.length ? `
       <div class="section-title"><h2>Mañana</h2><span class="muted small">${fmtDay(addDays(t, 1))}</span></div>
       <div class="card">
@@ -483,6 +491,10 @@ function renderWeek() {
       <button class="icon-btn" data-act="week-next" aria-label="Semana siguiente">›</button>
     </div>
     ${start !== mondayOf(t) ? `<div style="text-align:center;margin-top:8px"><button class="btn sm ghost" data-act="week-today">Ir a esta semana</button></div>` : ''}
+    ${!ws.planned.length ? `<div class="card" style="margin-top:14px;text-align:center">
+      <p class="muted small" style="margin:0 0 10px">No hay plan cargado para esta semana.</p>
+      ${pdfButton('📄 Subir PDF del plan', 'btn primary')}
+    </div>` : ''}
 
     <div class="card" style="margin-top:14px">
       <div class="row" style="gap:18px;align-items:center">
@@ -759,6 +771,9 @@ function renderSettings() {
       ${imported.length ? `<button class="btn sm danger" data-act="clear-weeks">Borrar semanas importadas</button>` : ''}
       <hr>
       <h3>Agregar una semana nueva</h3>
+      <p class="small muted">Subí el PDF de tu planificación: la app lo lee, te muestra lo que entendió para que lo revises y lo guarda.</p>
+      ${pdfButton('📄 Subir PDF de la semana', 'btn primary')}
+      <details style="margin-top:14px"><summary class="small muted" style="cursor:pointer">Otras opciones (si tu PDF no se lee bien)</summary>
       <p class="small muted">1) Copiá el prompt de abajo. 2) Pegalo en ChatGPT/Claude junto con el PDF de tu semana. 3) Pegá acá el JSON que te devuelve.</p>
       <div class="row wrap" style="margin:8px 0">
         <button class="btn sm" data-act="copy-prompt">📋 Copiar prompt</button>
@@ -768,7 +783,8 @@ function renderSettings() {
       <label class="field" style="margin-top:10px">JSON de la semana
         <textarea id="week-json" placeholder='{ "start": "2026-11-09", "sessions": [ … ] }' style="min-height:110px;font-family:ui-monospace,monospace;font-size:12px"></textarea>
       </label>
-      <button class="btn primary" data-act="import-week">Importar semana</button>
+      <button class="btn" data-act="import-week">Importar JSON</button>
+      </details>
     </div>
 
     <div class="card settings" style="margin-top:14px">
@@ -959,6 +975,13 @@ document.addEventListener('click', async e => {
     return;
   }
   if (act === 'import-week') { importWeekText(document.getElementById('week-json').value); return; }
+  if (act === 'imp-del') {
+    syncImportInputs();
+    pendingImport.sessions.splice(Number(el.dataset.i), 1);
+    showImportPreview();
+    return;
+  }
+  if (act === 'imp-save') { savePendingImport(); return; }
   if (act === 'clear-weeks') {
     if (!confirm('¿Borrar las semanas importadas? Los registros quedan guardados.')) return;
     state.weeks = []; invalidate(); save(); render(); return;
@@ -998,6 +1021,9 @@ document.addEventListener('change', e => {
     invalidate(); save(); render(); toast('Guardado');
     return;
   }
+  if (el.dataset.act === 'import-pdf' && el.files[0]) {
+    handlePdf(el.files[0]); el.value = ''; return;
+  }
   if (el.dataset.act === 'import-week-file' && el.files[0]) {
     el.files[0].text().then(importWeekText); el.value = ''; return;
   }
@@ -1033,6 +1059,300 @@ function importWeekText(txt) {
   if (!n) { toast('No encontré una semana válida (falta "start" o "sessions")'); return; }
   invalidate(); save(); render();
   toast(`✅ ${n} semana${n > 1 ? 's' : ''} importada${n > 1 ? 's' : ''}`);
+}
+
+/* ---------------- Importar PDF ----------------
+   pdf.js extrae el texto (todo en el navegador, nada se sube a ningún servidor)
+   y un parser heurístico reconoce días, deportes, duraciones y bloques. */
+const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+let pendingImport = null;
+
+const pdfButton = (text, cls) =>
+  `<label class="${cls}" style="cursor:pointer">${text}<input type="file" accept="application/pdf,.pdf" data-act="import-pdf" hidden></label>`;
+
+function loadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = PDFJS + 'pdf.min.js';
+    s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + 'pdf.worker.min.js'; resolve(window.pdfjsLib); };
+    s.onerror = () => reject(new Error('No se pudo cargar el lector de PDF. Revisá tu conexión a internet.'));
+    document.head.appendChild(s);
+  });
+}
+
+// Reconstruye las líneas del PDF agrupando los fragmentos de texto por altura.
+async function pdfToLines(file) {
+  const lib = await loadPdfJs();
+  const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const lines = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const { items } = await (await pdf.getPage(p)).getTextContent();
+    const rows = [];
+    for (const it of items) {
+      if (!it.str || !it.str.trim()) continue;
+      const y = it.transform[5];
+      let row = rows.find(r => Math.abs(r.y - y) < Math.max(3, (it.height || 10) * 0.5));
+      if (!row) rows.push(row = { y, items: [] });
+      row.items.push({ x: it.transform[4], w: it.width, s: it.str });
+    }
+    rows.sort((a, b) => b.y - a.y);
+    for (const r of rows) {
+      r.items.sort((a, b) => a.x - b.x);
+      let txt = '', end = null;
+      for (const it of r.items) {
+        if (end !== null && it.x - end > 1 && !/\s$/.test(txt)) txt += ' ';
+        txt += it.s;
+        end = it.x + it.w;
+      }
+      txt = txt.replace(/\s+/g, ' ').trim();
+      if (txt) lines.push(txt);
+    }
+  }
+  return lines;
+}
+
+const norm = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const DAY_IDX = { lunes: 0, martes: 1, miercoles: 2, jueves: 3, viernes: 4, sabado: 5, domingo: 6 };
+const MONTH_IDX = { enero: 0, febrero: 1, marzo: 2, abril: 3, mayo: 4, junio: 5, julio: 6, agosto: 7, septiembre: 8, setiembre: 8, octubre: 9, noviembre: 10, diciembre: 11 };
+const SPORT_WORDS = [
+  [/^(natacion|nado|swim|pileta|piscina)$/, 'swim'],
+  [/^(bici|bicicleta|ciclismo|bike|rodillo)$/, 'bike'],
+  [/^(carrera|correr|run|running|trote)$/, 'run'],
+  [/^(fuerza|gym|gimnasio|strength|pesas)$/, 'strength'],
+  [/^(descanso|off|rest|libre)$/, 'rest']
+];
+const sportWord = w => { const n = norm(w || '').replace(/[^a-z]/g, ''); for (const [re, k] of SPORT_WORDS) if (re.test(n)) return k; return null; };
+function guessSport(text) {
+  const t = norm(text);
+  if (/nad|brazad|pileta|piscina|crol|\d+ ?x ?\d+ ?m\b/.test(t)) return 'swim';
+  if (/bici|pedal|plato|cadencia|rpm|vatios|watts/.test(t)) return 'bike';
+  if (/corr|trote|zancada|\/km/.test(t)) return 'run';
+  if (/fuerza|sentadilla|peso muerto|gym/.test(t)) return 'strength';
+  return 'other';
+}
+const niceTitle = words => words.map(w => /\d/.test(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+
+// "FUERZA D1 NATACIÓN 1H" → [{sport:'strength', title:'Fuerza D1'}, {sport:'swim', duration:60}]
+function parseDayHeader(rest) {
+  const toks = rest.replace(/(\d)\s*[-–]\s*(\d)/g, '$1-$2').replace(/(\d)\s+(h|hs|hrs|min)\b/gi, '$1$2').split(/\s+/).filter(Boolean);
+  const out = [];
+  let cur = null;
+  for (const t of toks) {
+    const sp = sportWord(t);
+    const dm = t.match(/^(\d+(?:[.,]\d+)?)(?:-(\d+(?:[.,]\d+)?))?(h|hs|hrs|min|')$/i);
+    if (sp) { cur = { sport: sp, words: [t] }; out.push(cur); }
+    else if (dm && cur) {
+      const unit = /min|'/i.test(dm[3]) ? 1 : 60;
+      cur.duration = Math.round(parseFloat(dm[1].replace(',', '.')) * unit);
+      if (dm[2]) cur.durationLabel = `${dm[1]}–${dm[2]} ${unit === 60 ? 'h' : 'min'}`;
+    } else if (cur) cur.words.push(t);
+  }
+  return out.filter(s => s.sport !== 'rest').map(s => ({
+    sport: s.sport, title: niceTitle(s.words), duration: s.duration || 60, durationLabel: s.durationLabel, blocks: []
+  }));
+}
+
+// Separa el cuerpo de un día en secciones ("Ciclismo: …", "Carrera: …"), bloques ("Calentamiento: …") y notas.
+function parseDayBody(lines, sessions, weekNotes) {
+  const secs = [];
+  let cur = null, note = null, prevEnded = true;
+  const newSec = (sport, title) => { cur = { sport, title, blocks: [] }; secs.push(cur); note = null; };
+  for (const ln of lines) {
+    const m = ln.match(/^([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñü ()/]{1,34}):\s*(.*)$/);
+    const labelWords = m ? m[1].trim().split(/\s+/) : [];
+    const secSport = m && labelWords.length <= 2 ? sportWord(labelWords[0]) : null;
+    if (secSport && secSport !== 'rest') { newSec(secSport, m[2].trim()); prevEnded = true; continue; }
+    if (note) { note.text += (note.text ? ' ' : '') + ln; prevEnded = /[.!?)"]$/.test(ln); continue; }
+    if (m) {
+      if (!cur) newSec(null, '');
+      cur.blocks.push({ label: m[1].trim(), text: m[2].trim() });
+      prevEnded = /[.!?)"]$/.test(ln);
+      continue;
+    }
+    const heading = prevEnded && /^[A-ZÁÉÍÓÚÑ¿¡]/.test(ln) && !/[.,;:]$/.test(ln) && ln.length <= 70 && ln.split(' ').length <= 9;
+    if (heading) {
+      if (!cur) newSec(null, '');
+      if (!cur.title && !cur.blocks.length) { cur.title = ln; prevEnded = true; continue; }
+      note = { title: ln, text: '' };
+      weekNotes.push(note);
+      prevEnded = true;
+      continue;
+    }
+    if (!cur) newSec(null, '');
+    const last = cur.blocks[cur.blocks.length - 1];
+    if (last) last.text += (last.text ? ' ' : '') + ln;
+    else cur.blocks.push({ label: 'Principal', text: ln });
+    prevEnded = /[.!?)"]$/.test(ln);
+  }
+
+  const used = new Set();
+  for (const sec of secs) {
+    let idx = sec.sport
+      ? sessions.findIndex((s, i) => !used.has(i) && s.sport === sec.sport)
+      : sessions.findIndex((s, i) => !used.has(i) && s.sport !== 'strength');
+    if (idx < 0 && !sec.sport) idx = sessions.findIndex((s, i) => !used.has(i));
+    if (idx < 0) {
+      const sport = sec.sport || guessSport(`${sec.title} ${sec.blocks.map(b => b.text).join(' ')}`);
+      sessions.push({ sport, title: SPORTS[sport].label, duration: 60, blocks: [] });
+      idx = sessions.length - 1;
+    }
+    used.add(idx);
+    const s = sessions[idx];
+    if (sec.title) s.title = sec.title;
+    s.blocks = sec.blocks;
+    const vol = sec.blocks.find(b => /volumen|distancia/i.test(b.label));
+    if (vol) s.distance = vol.text.replace(/\.$/, '');
+    if (/transici|brick/i.test(sec.title)) s.tag = 'Brick';
+  }
+}
+
+function findWeekStart(lines, days) {
+  const all = lines.join(' ');
+  const m = all.match(/(\d{1,2})(?:\s+de\s+([a-záéíóú]+))?\s+al\s+(\d{1,2})\s+de\s+([a-záéíóú]+)(?:\s+(?:de|del)\s+(\d{4}))?/i);
+  const startMonth = m?.[2] ? MONTH_IDX[norm(m[2])] : null;
+  const endMonth = m ? MONTH_IDX[norm(m[4])] ?? null : null;
+  const year = m?.[5] ? Number(m[5]) : null;
+  // Fecha más cercana a hoy con ese número de día, ese día de la semana y (si se sabe) ese mes.
+  const search = (num, idx) => {
+    let best = null;
+    for (let off = -120; off <= 240; off++) {
+      const d = parse(addDays(todayISO(), off));
+      if (d.getDate() !== num || (d.getDay() + 6) % 7 !== idx) continue;
+      const mo = d.getMonth();
+      if (startMonth !== null && mo !== startMonth) continue;
+      if (startMonth === null && endMonth !== null && mo !== endMonth && mo !== (endMonth + 11) % 12) continue;
+      if (year && d.getFullYear() !== year) continue;
+      if (!best || Math.abs(off) < Math.abs(best.off)) best = { off, d };
+    }
+    return best ? mondayOf(iso(best.d)) : null;
+  };
+  if (m) { const r = search(Number(m[1]), 0); if (r) return r; }
+  for (const d of days.filter(x => x.num !== null)) { const r = search(d.num, d.idx); if (r) return r; }
+  return null;
+}
+
+function parsePlanText(rawLines) {
+  const lines = rawLines.filter(l => !/p[aá]gina\s*\d+/i.test(l));
+  const dayRe = /^(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b\.?\s*(\d{1,2})?\b\s*(.*)$/i;
+  const days = [];
+  let cur = null;
+  const preamble = [];
+  for (const ln of lines) {
+    const m = ln.match(dayRe);
+    if (m) { cur = { idx: DAY_IDX[norm(m[1])], num: m[2] ? Number(m[2]) : null, header: m[3] || '', body: [] }; days.push(cur); continue; }
+    (cur ? cur.body : preamble).push(ln);
+  }
+  const notes = [];
+  const sessions = [];
+  for (const d of days) {
+    const list = parseDayHeader(d.header);
+    parseDayBody(d.body, list, notes);
+    list.forEach(s => sessions.push({ day: d.idx, ...s }));
+  }
+  const titleLine = preamble.find(l => /semana/i.test(l)) || '';
+  const title = (titleLine.split(':')[0] || '').trim();
+  const subtitle = titleLine.includes('|') ? titleLine.split('|').pop().trim() : '';
+  const lastStart = allWeeks().map(w => w.start).sort().pop();
+  return {
+    start: findWeekStart(lines, days) || (lastStart ? addDays(lastStart, 7) : mondayOf(todayISO())),
+    title: title && !/^semana del/i.test(title) ? title : 'Semana importada',
+    subtitle,
+    notes: notes.filter(n => n.text),
+    sessions
+  };
+}
+
+async function handlePdf(file) {
+  toast('📄 Leyendo PDF…');
+  try {
+    const week = parsePlanText(await pdfToLines(file));
+    if (!week.sessions.length) throw new Error('No encontré días con sesiones (Lunes, Martes…) en el PDF.');
+    pendingImport = week;
+    showImportPreview();
+  } catch (err) {
+    openModal(`
+      <div class="modal-head"><h2>No pude leer el PDF</h2><button class="icon-btn" data-act="close">✕</button></div>
+      <p>${esc(/^No /.test(err.message) ? err.message : 'El archivo no parece un PDF válido o está protegido.')}</p>
+      <p class="small muted">Si tu PDF tiene otro formato, andá a <b>Ajustes → Otras opciones</b>: copiá el prompt, pegalo en ChatGPT o Claude junto con el PDF, y pegá el resultado en la app.</p>
+      <button class="btn" style="width:100%" data-act="close">Entendido</button>`);
+  }
+}
+
+function syncImportInputs() {
+  if (!pendingImport) return;
+  const start = document.getElementById('imp-start');
+  if (start?.value) pendingImport.start = start.value;
+  const title = document.getElementById('imp-title');
+  if (title) pendingImport.title = title.value;
+  document.querySelectorAll('[data-imp-row]').forEach(row => {
+    const s = pendingImport.sessions[Number(row.dataset.impRow)];
+    s.day = Number(row.querySelector('[name=day]').value);
+    s.sport = row.querySelector('[name=sport]').value;
+    s.title = row.querySelector('[name=title]').value;
+    s.duration = Number(row.querySelector('[name=duration]').value) || 0;
+  });
+}
+
+function showImportPreview() {
+  const w = pendingImport;
+  const start = mondayOf(w.start);
+  const exists = allWeeks().some(x => x.start === start);
+  const order = w.sessions.map((s, i) => i).sort((a, b) => w.sessions[a].day - w.sessions[b].day);
+  const totals = {};
+  w.sessions.forEach(s => { totals[s.sport] = (totals[s.sport] || 0) + s.duration; });
+  openModal(`
+    <div class="modal-head"><h2>Revisá la semana</h2><button class="icon-btn" data-act="close">✕</button></div>
+    <p class="small muted" style="margin-top:0">Esto es lo que entendí del PDF. Corregí lo que haga falta y guardala.</p>
+    <div class="settings">
+      <div class="grid-2">
+        <label class="field">Lunes de la semana<input type="date" id="imp-start" value="${esc(start)}"></label>
+        <label class="field">Nombre<input id="imp-title" value="${esc(w.title)}"></label>
+      </div>
+    </div>
+    <p class="small muted" style="margin:4px 0 10px">${fmtShort(start)} – ${fmtShort(addDays(start, 6))} · ${w.sessions.length} sesiones · ${Object.entries(totals).map(([k, v]) => `${SPORTS[k]?.emoji || ''} ${fmtMin(v)}`).join(' · ')}</p>
+    ${exists ? `<div class="alert" style="margin-bottom:12px"><span>⚠️</span><div class="small">Ya hay un plan cargado para esa semana: se va a reemplazar por este.</div></div>` : ''}
+    <div class="stack">
+      ${order.map(i => {
+        const s = w.sessions[i];
+        const sp = SPORTS[s.sport] || SPORTS.other;
+        return `<div class="card imp-row" data-imp-row="${i}" style="border-left:5px solid ${sp.color}">
+          <div class="imp-grid">
+            <select name="day" aria-label="Día">${DAY_NAMES.map((d, j) => `<option value="${j}" ${j === s.day ? 'selected' : ''}>${d}</option>`).join('')}</select>
+            <select name="sport" aria-label="Deporte">${Object.entries(SPORTS).map(([k, v]) => `<option value="${k}" ${k === s.sport ? 'selected' : ''}>${v.emoji} ${v.label}</option>`).join('')}</select>
+            <label class="imp-min"><input name="duration" type="number" inputmode="numeric" value="${s.duration}" aria-label="Minutos">min</label>
+            <input name="title" value="${esc(s.title)}" aria-label="Título" class="imp-title">
+            <button class="icon-btn imp-del" data-act="imp-del" data-i="${i}" aria-label="Quitar sesión">✕</button>
+          </div>
+          ${s.blocks.length ? `<details style="margin-top:8px"><summary class="small muted" style="cursor:pointer">${s.blocks.length} bloque${s.blocks.length > 1 ? 's' : ''} de detalle</summary>
+            ${s.blocks.map(b => `<div class="small" style="margin-top:6px"><b>${esc(b.label)}:</b> ${esc(b.text)}</div>`).join('')}
+          </details>` : ''}
+        </div>`;
+      }).join('')}
+    </div>
+    ${w.notes.length ? `<div class="section-title" style="margin-top:16px"><h3>Notas de la semana</h3></div>
+      ${w.notes.map(n => `<div class="alert info small" style="margin-bottom:8px"><span>📌</span><div><b>${esc(n.title)}</b><div>${esc(n.text)}</div></div></div>`).join('')}` : ''}
+    <div class="grid-2" style="margin-top:16px">
+      <button class="btn" data-act="close">Cancelar</button>
+      <button class="btn primary" data-act="imp-save">Guardar semana</button>
+    </div>`);
+}
+
+function savePendingImport() {
+  syncImportInputs();
+  const w = pendingImport;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(w.start)) { toast('Elegí la fecha del lunes'); return; }
+  w.start = mondayOf(w.start);
+  w.sessions.sort((a, b) => a.day - b.day);
+  state.weeks = state.weeks.filter(x => x.start !== w.start).concat(w);
+  pendingImport = null;
+  invalidate(); save();
+  weekCursor = w.start;
+  tab = 'week';
+  closeModal();
+  window.scrollTo(0, 0);
+  confetti();
+  toast(`✅ Semana del ${fmtShort(w.start)} cargada`);
 }
 
 function exportBackup() {
