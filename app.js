@@ -71,6 +71,9 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const DEFAULT_STATE = {
   config: {
     name: '',
+    height: '',
+    weight: '',
+    bike: '',
     raceName: 'Ironman 70.3',
     raceDate: '2027-04-18',
     startDate: '',
@@ -118,7 +121,7 @@ function allSessions() {
   const out = [];
   for (const w of allWeeks()) {
     (w.sessions || []).forEach((s, i) => {
-      out.push({ ...s, id: `${w.start}#${i}`, date: addDays(w.start, s.day ?? 0), week: w.start, source: w.source });
+      out.push({ ...s, id: `${w.start}#${s.uid ?? i}`, date: addDays(w.start, s.day ?? 0), week: w.start, source: w.source });
     });
   }
   for (const s of state.extra) out.push({ ...s, week: mondayOf(s.date), source: 'extra' });
@@ -490,7 +493,10 @@ function renderWeek() {
       </div>
       <button class="icon-btn" data-act="week-next" aria-label="Semana siguiente">›</button>
     </div>
-    ${start !== mondayOf(t) ? `<div style="text-align:center;margin-top:8px"><button class="btn sm ghost" data-act="week-today">Ir a esta semana</button></div>` : ''}
+    <div class="row" style="justify-content:center;gap:8px;margin-top:8px">
+      ${start !== mondayOf(t) ? `<button class="btn sm ghost" data-act="week-today">Ir a esta semana</button>` : ''}
+      ${meta ? `<button class="btn sm" data-act="edit-week">✏️ Editar semana</button>` : ''}
+    </div>
     ${!ws.planned.length ? `<div class="card" style="margin-top:14px;text-align:center">
       <p class="muted small" style="margin:0 0 10px">No hay plan cargado para esta semana.</p>
       ${pdfButton('📄 Subir PDF del plan', 'btn primary')}
@@ -609,6 +615,7 @@ function renderProgress() {
   $view.innerHTML = `
     <h1>Tu progreso</h1>
     <p class="muted small" style="margin:4px 0 0">Desde ${fmtShort(startDate())} · ${weeks.length} semana${weeks.length === 1 ? '' : 's'} de entrenamiento</p>
+    ${profileChips()}
 
     <div class="grid-4" style="margin-top:14px">
       <div class="card kpi"><b>${hours(totalMin)} h</b><span>entrenadas</span></div>
@@ -681,6 +688,17 @@ function renderProgress() {
   `;
 }
 
+function profileChips() {
+  const c = state.config;
+  const chips = [
+    c.name && `👤 ${esc(c.name)}`,
+    c.height && `📏 ${esc(c.height)} m`,
+    c.weight && `⚖️ ${esc(c.weight)} kg`,
+    c.bike && `🚲 ${esc(c.bike)}`
+  ].filter(Boolean);
+  return chips.length ? `<div class="profile">${chips.map(x => `<span class="chip">${x}</span>`).join('')}</div>` : '';
+}
+
 function heatmap() {
   const start = mondayOf(startDate());
   const end = state.config.raceDate;
@@ -747,8 +765,18 @@ function renderSettings() {
   $view.innerHTML = `
     <h1>Ajustes</h1>
     <div class="card settings" style="margin-top:14px">
+      <h3 style="margin-bottom:12px">👤 Atleta</h3>
+      <label class="field">Nombre o apodo<input data-cfg="name" value="${esc(c.name)}" placeholder="Ej: chori"></label>
+      <div class="grid-2">
+        <label class="field">Altura (m)<input data-cfg="height" value="${esc(c.height)}" inputmode="decimal" placeholder="1,75"></label>
+        <label class="field">Peso (kg)<input data-cfg="weight" value="${esc(c.weight)}" inputmode="decimal" placeholder="81"></label>
+      </div>
+      <label class="field">Bicicleta<input data-cfg="bike" value="${esc(c.bike)}" placeholder="Ej: Zion Rufian"></label>
+      <p class="small muted" style="margin:0">Al subir un PDF, el nombre del atleta y la bici que figuren en él se reemplazan por los tuyos.</p>
+    </div>
+
+    <div class="card settings" style="margin-top:14px">
       <h3 style="margin-bottom:12px">🏁 Tu carrera</h3>
-      <label class="field">Tu nombre<input data-cfg="name" value="${esc(c.name)}" placeholder="Ej: Rodrigo"></label>
       <label class="field">Carrera<input data-cfg="raceName" value="${esc(c.raceName)}" placeholder="Ironman 70.3 …"></label>
       <div class="grid-2">
         <label class="field">Fecha de la carrera<input type="date" data-cfg="raceDate" value="${esc(c.raceDate)}"></label>
@@ -982,6 +1010,24 @@ document.addEventListener('click', async e => {
     return;
   }
   if (act === 'imp-save') { savePendingImport(); return; }
+  if (act === 'imp-add') {
+    syncImportInputs();
+    const last = pendingImport.sessions[pendingImport.sessions.length - 1];
+    pendingImport.sessions.push({ uid: newUid(), day: last ? last.day : 0, sport: 'run', title: 'Nueva sesión', duration: 60, blocks: [] });
+    showImportPreview();
+    $modalBody.scrollTop = $modalBody.scrollHeight;
+    return;
+  }
+  if (act === 'imp-add-note') { syncImportInputs(); pendingImport.notes.push({ title: '', text: '' }); showImportPreview(); return; }
+  if (act === 'imp-del-note') { syncImportInputs(); pendingImport.notes.splice(Number(el.dataset.i), 1); showImportPreview(); return; }
+  if (act === 'edit-week') { const w = weekMeta(weekCursor); if (w) openWeekEditor(w, 'edit'); return; }
+  if (act === 'imp-delete-week') {
+    if (!confirm('¿Eliminar el plan de esta semana? Tus registros quedan guardados.')) return;
+    state.weeks = state.weeks.filter(x => x.start !== mondayOf(pendingImport.start));
+    pendingImport = null;
+    invalidate(); save(); closeModal(); toast('Plan eliminado');
+    return;
+  }
   if (act === 'clear-weeks') {
     if (!confirm('¿Borrar las semanas importadas? Los registros quedan guardados.')) return;
     state.weeks = []; invalidate(); save(); render(); return;
@@ -1081,11 +1127,12 @@ function loadPdfJs() {
   });
 }
 
-// Reconstruye las líneas del PDF agrupando los fragmentos de texto por altura.
-async function pdfToLines(file) {
+// Reconstruye las filas del PDF agrupando los fragmentos de texto por altura.
+// Cada fila guarda sus fragmentos con su posición x para poder separar columnas de tablas.
+async function pdfToRows(file) {
   const lib = await loadPdfJs();
   const pdf = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
-  const lines = [];
+  const out = [];
   for (let p = 1; p <= pdf.numPages; p++) {
     const { items } = await (await pdf.getPage(p)).getTextContent();
     const rows = [];
@@ -1099,21 +1146,27 @@ async function pdfToLines(file) {
     rows.sort((a, b) => b.y - a.y);
     for (const r of rows) {
       r.items.sort((a, b) => a.x - b.x);
-      let txt = '', end = null;
-      for (const it of r.items) {
-        if (end !== null && it.x - end > 1 && !/\s$/.test(txt)) txt += ' ';
-        txt += it.s;
-        end = it.x + it.w;
-      }
-      txt = txt.replace(/\s+/g, ' ').trim();
-      if (txt) lines.push(txt);
+      const text = joinItems(r.items);
+      if (text) out.push({ text, items: r.items });
     }
   }
-  return lines;
+  return out;
+}
+
+function joinItems(items) {
+  let txt = '', end = null;
+  for (const it of items) {
+    if (end !== null && it.x - end > 1 && !/\s$/.test(txt)) txt += ' ';
+    txt += it.s;
+    end = it.x + it.w;
+  }
+  return txt.replace(/\s+/g, ' ').trim();
 }
 
 const norm = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const DAY_IDX = { lunes: 0, martes: 1, miercoles: 2, jueves: 3, viernes: 4, sabado: 5, domingo: 6 };
+const DAY_RE = /^(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b\.?\s*(\d{1,2})?\b\s*(.*)$/i;
 const MONTH_IDX = { enero: 0, febrero: 1, marzo: 2, abril: 3, mayo: 4, junio: 5, julio: 6, agosto: 7, septiembre: 8, setiembre: 8, octubre: 9, noviembre: 10, diciembre: 11 };
 const SPORT_WORDS = [
   [/^(natacion|nado|swim|pileta|piscina)$/, 'swim'],
@@ -1133,45 +1186,85 @@ function guessSport(text) {
 }
 const niceTitle = words => words.map(w => /\d/.test(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
 
-// "FUERZA D1 NATACIÓN 1H" → [{sport:'strength', title:'Fuerza D1'}, {sport:'swim', duration:60}]
+// "1.5h", "1-2H", "45min" → { duration, durationLabel }
+function parseDuration(t) {
+  const m = t.match(/(\d+(?:[.,]\d+)?)(?:\s*[-–a]\s*(\d+(?:[.,]\d+)?))?\s*(h|hs|hrs|horas?|min|')\b/i) || t.match(/(\d+(?:[.,]\d+)?)(?:\s*[-–]\s*(\d+(?:[.,]\d+)?))?\s*(h|')$/i);
+  if (!m) return null;
+  const unit = /min|'/i.test(m[3]) ? 1 : 60;
+  return {
+    duration: Math.round(parseFloat(m[1].replace(',', '.')) * unit),
+    durationLabel: m[2] ? `${m[1]}–${m[2]} ${unit === 60 ? 'h' : 'min'}` : undefined
+  };
+}
+
+// Formato "Lunes 2 FUERZA D1 NATACIÓN 1H" → [{sport:'strength', title:'Fuerza D1'}, {sport:'swim', duration:60}]
 function parseDayHeader(rest) {
   const toks = rest.replace(/(\d)\s*[-–]\s*(\d)/g, '$1-$2').replace(/(\d)\s+(h|hs|hrs|min)\b/gi, '$1$2').split(/\s+/).filter(Boolean);
   const out = [];
   let cur = null;
   for (const t of toks) {
     const sp = sportWord(t);
-    const dm = t.match(/^(\d+(?:[.,]\d+)?)(?:-(\d+(?:[.,]\d+)?))?(h|hs|hrs|min|')$/i);
+    const dm = t.match(/^\(?(\d+(?:[.,]\d+)?)(?:-(\d+(?:[.,]\d+)?))?(h|hs|hrs|min|')\)?$/i);
     if (sp) { cur = { sport: sp, words: [t] }; out.push(cur); }
-    else if (dm && cur) {
-      const unit = /min|'/i.test(dm[3]) ? 1 : 60;
-      cur.duration = Math.round(parseFloat(dm[1].replace(',', '.')) * unit);
-      if (dm[2]) cur.durationLabel = `${dm[1]}–${dm[2]} ${unit === 60 ? 'h' : 'min'}`;
-    } else if (cur) cur.words.push(t);
+    else if (dm && cur) Object.assign(cur, parseDuration(t.replace(/[()]/g, '')));
+    else if (cur) cur.words.push(t);
   }
   return out.filter(s => s.sport !== 'rest').map(s => ({
     sport: s.sport, title: niceTitle(s.words), duration: s.duration || 60, durationLabel: s.durationLabel, blocks: []
   }));
 }
 
-// Separa el cuerpo de un día en secciones ("Ciclismo: …", "Carrera: …"), bloques ("Calentamiento: …") y notas.
+// Formato tabla, columna "Disciplinas": "Natación (1.5h)", "Fuerza (Día 1)"
+function parseDisciplines(lines) {
+  const out = [];
+  for (const ln of lines) {
+    const sp = sportWord(ln.split(/[\s(]/)[0]);
+    if (!sp || sp === 'rest') { if (out.length) out[out.length - 1].title += ' ' + ln; continue; }
+    const d = parseDuration(ln);
+    const title = ln.replace(/\(\s*\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?\s*(h|hs|hrs|horas?|min|')\s*\)/i, '').trim();
+    out.push({ sport: sp, title, duration: d?.duration || 60, durationLabel: d?.durationLabel, blocks: [] });
+  }
+  return out;
+}
+
+// Separa el texto de un día en secciones por deporte ("Natación (Umbral):", "Ciclismo: Tempo"),
+// bloques ("• Calentamiento: …", "Press banca: 5 x 4") y notas de la semana.
 function parseDayBody(lines, sessions, weekNotes) {
   const secs = [];
-  let cur = null, note = null, prevEnded = true;
-  const newSec = (sport, title) => { cur = { sport, title, blocks: [] }; secs.push(cur); note = null; };
-  for (const ln of lines) {
-    const m = ln.match(/^([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñü ()/]{1,34}):\s*(.*)$/);
-    const labelWords = m ? m[1].trim().split(/\s+/) : [];
-    const secSport = m && labelWords.length <= 2 ? sportWord(labelWords[0]) : null;
-    if (secSport && secSport !== 'rest') { newSec(secSport, m[2].trim()); prevEnded = true; continue; }
-    if (note) { note.text += (note.text ? ' ' : '') + ln; prevEnded = /[.!?)"]$/.test(ln); continue; }
-    if (m) {
-      if (!cur) newSec(null, '');
-      cur.blocks.push({ label: m[1].trim(), text: m[2].trim() });
-      prevEnded = /[.!?)"]$/.test(ln);
+  let cur = null, note = null, prevEnded = true, lastBullet = false;
+  const newSec = (sport, title) => { cur = { sport, title, blocks: [] }; secs.push(cur); note = null; lastBullet = false; };
+  const ends = l => /[.!?)"”]$/.test(l);
+  for (const raw of lines) {
+    const bullet = /^[•·▪●◦*\-–]\s*/.test(raw);
+    const ln = raw.replace(/^[•·▪●◦*\-–]\s*/, '').trim();
+    if (!ln) continue;
+    const sec = ln.match(/^([A-Za-zÁÉÍÓÚÑáéíóúñ]+)\s*(?:\(([^)]*)\))?\s*:\s*(.*)$/);
+    const secSport = sec ? sportWord(sec[1]) : null;
+    if (secSport && secSport !== 'rest') {
+      newSec(secSport, (sec[2] || sec[3] || '').trim());
+      if (sec[2] && sec[3].trim()) cur.blocks.push({ label: 'Nota', text: sec[3].trim() });
+      prevEnded = ends(ln) || !sec[3].trim();
       continue;
     }
-    const heading = prevEnded && /^[A-ZÁÉÍÓÚÑ¿¡]/.test(ln) && !/[.,;:]$/.test(ln) && ln.length <= 70 && ln.split(' ').length <= 9;
-    if (heading) {
+    if (note) { note.text += (note.text ? ' ' : '') + ln; prevEnded = ends(ln); continue; }
+    const titleOnly = ln.match(/^([A-ZÁÉÍÓÚÑ¿¡][^:]{2,70}):$/);
+    if (titleOnly && !bullet) {
+      if (!cur || cur.blocks.length || cur.title) newSec(null, titleOnly[1].trim());
+      else cur.title = titleOnly[1].trim();
+      prevEnded = true;
+      continue;
+    }
+    const lab = ln.match(/^([A-ZÁÉÍÓÚÑ][^:.]{0,44}):\s*(.+)$/);
+    if (lab && !(lastBullet && !bullet)) {
+      if (!cur) newSec(null, '');
+      cur.blocks.push({ label: lab[1].trim(), text: lab[2].trim() });
+      lastBullet = bullet;
+      prevEnded = ends(ln);
+      continue;
+    }
+    // Un título suelto (sin dos puntos ni oraciones) abre la sesión o, si la sesión ya tiene contenido, una nota de la semana.
+    const heading = !bullet && !lastBullet && prevEnded && /^[A-ZÁÉÍÓÚÑ¿¡]/.test(ln) && !/[.,;:+]$/.test(ln) && !/[:.]\s/.test(ln) && ln.length <= 70 && ln.split(' ').length <= 9;
+    if (heading && !(cur && cur.title && !cur.blocks.length)) {
       if (!cur) newSec(null, '');
       if (!cur.title && !cur.blocks.length) { cur.title = ln; prevEnded = true; continue; }
       note = { title: ln, text: '' };
@@ -1181,17 +1274,19 @@ function parseDayBody(lines, sessions, weekNotes) {
     }
     if (!cur) newSec(null, '');
     const last = cur.blocks[cur.blocks.length - 1];
-    if (last) last.text += (last.text ? ' ' : '') + ln;
-    else cur.blocks.push({ label: 'Principal', text: ln });
-    prevEnded = /[.!?)"]$/.test(ln);
+    if (last && !bullet) last.text += (last.text ? ' ' : '') + ln;
+    else { cur.blocks.push({ label: last ? '' : 'Principal', text: ln }); lastBullet = bullet; }
+    prevEnded = ends(ln);
   }
 
+  // Cada sección se asigna a una sesión del mismo deporte (sin duplicar).
   const used = new Set();
   for (const sec of secs) {
     let idx = sec.sport
       ? sessions.findIndex((s, i) => !used.has(i) && s.sport === sec.sport)
       : sessions.findIndex((s, i) => !used.has(i) && s.sport !== 'strength');
     if (idx < 0 && !sec.sport) idx = sessions.findIndex((s, i) => !used.has(i));
+    if (idx < 0 && sec.sport && !sec.blocks.length && !sec.title) continue;
     if (idx < 0) {
       const sport = sec.sport || guessSport(`${sec.title} ${sec.blocks.map(b => b.text).join(' ')}`);
       sessions.push({ sport, title: SPORTS[sport].label, duration: 60, blocks: [] });
@@ -1207,69 +1302,128 @@ function parseDayBody(lines, sessions, weekNotes) {
   }
 }
 
-function findWeekStart(lines, days) {
-  const all = lines.join(' ');
-  const m = all.match(/(\d{1,2})(?:\s+de\s+([a-záéíóú]+))?\s+al\s+(\d{1,2})\s+de\s+([a-záéíóú]+)(?:\s+(?:de|del)\s+(\d{4}))?/i);
-  const startMonth = m?.[2] ? MONTH_IDX[norm(m[2])] : null;
+function findWeekStart(text, days) {
+  const m = text.match(/(\d{1,2})(?:\s+de\s+([a-záéíóú]+))?\s+al\s+(\d{1,2})\s+de\s+([a-záéíóú]+)(?:\s+(?:de|del)\s+(\d{4}))?/i);
+  const startMonth = m?.[2] ? MONTH_IDX[norm(m[2])] ?? null : null;
   const endMonth = m ? MONTH_IDX[norm(m[4])] ?? null : null;
   const year = m?.[5] ? Number(m[5]) : null;
   // Fecha más cercana a hoy con ese número de día, ese día de la semana y (si se sabe) ese mes.
-  const search = (num, idx) => {
+  const search = (num, idx, strict) => {
     let best = null;
     for (let off = -120; off <= 240; off++) {
       const d = parse(addDays(todayISO(), off));
       if (d.getDate() !== num || (d.getDay() + 6) % 7 !== idx) continue;
       const mo = d.getMonth();
-      if (startMonth !== null && mo !== startMonth) continue;
-      if (startMonth === null && endMonth !== null && mo !== endMonth && mo !== (endMonth + 11) % 12) continue;
+      if (strict && startMonth !== null && mo !== startMonth) continue;
+      if (strict && startMonth === null && endMonth !== null && mo !== endMonth && mo !== (endMonth + 11) % 12) continue;
       if (year && d.getFullYear() !== year) continue;
       if (!best || Math.abs(off) < Math.abs(best.off)) best = { off, d };
     }
     return best ? mondayOf(iso(best.d)) : null;
   };
-  if (m) { const r = search(Number(m[1]), 0); if (r) return r; }
-  for (const d of days.filter(x => x.num !== null)) { const r = search(d.num, d.idx); if (r) return r; }
+  if (m) { const r = search(Number(m[1]), 0, true); if (r) return r; }
+  for (const d of days.filter(x => x.num !== null)) { const r = search(d.num, d.idx, !!m); if (r) return r; }
   return null;
 }
 
-function parsePlanText(rawLines) {
-  const lines = rawLines.filter(l => !/p[aá]gina\s*\d+/i.test(l));
-  const dayRe = /^(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b\.?\s*(\d{1,2})?\b\s*(.*)$/i;
-  const days = [];
-  let cur = null;
-  const preamble = [];
-  for (const ln of lines) {
-    const m = ln.match(dayRe);
-    if (m) { cur = { idx: DAY_IDX[norm(m[1])], num: m[2] ? Number(m[2]) : null, header: m[3] || '', body: [] }; days.push(cur); continue; }
-    (cur ? cur.body : preamble).push(ln);
+// Si el PDF tiene una tabla con encabezado "Día | Disciplinas | Entrenamiento", devuelve los cortes de columna.
+function tableColumns(rows) {
+  for (const r of rows) {
+    if (!/^dia\b/.test(norm(r.text)) || !/disciplina/.test(norm(r.text))) continue;
+    const disc = r.items.find(i => /disciplina/.test(norm(i.s)));
+    const body = r.items.find(i => /entrenamiento|detalle|sesion|descripcion/.test(norm(i.s)));
+    if (disc && body) return [disc.x - 3, body.x - 3];
   }
+  return null;
+}
+
+function parsePlanRows(rows) {
+  const isFooter = t => /p[aá]gina\s*\d+/i.test(t);
+  const isTableHead = t => /^dia\b/.test(norm(t)) && /disciplina/.test(norm(t));
+  const cols = tableColumns(rows);
+  const days = [];
+  const preamble = [];
+  let cur = null;
+
+  if (cols) {
+    let started = false;
+    for (const r of rows) {
+      if (isTableHead(r.text)) { started = true; continue; }
+      if (isFooter(r.text)) continue;
+      if (!started) { preamble.push(r.text); continue; }
+      const parts = [[], [], []];
+      r.items.forEach(it => parts[it.x < cols[0] ? 0 : it.x < cols[1] ? 1 : 2].push(it));
+      const [c0, c1, c2] = parts.map(joinItems);
+      const dm = c0.match(DAY_RE);
+      if (dm) {
+        cur = { idx: DAY_IDX[norm(dm[1])], num: dm[2] ? Number(dm[2]) : null, disc: [], body: [] };
+        days.push(cur);
+      } else if (cur && /^\d{1,2}$/.test(c0)) cur.num = Number(c0);
+      if (!cur) continue;
+      if (c1) cur.disc.push(c1);
+      if (c2) cur.body.push(c2);
+    }
+  } else {
+    for (const r of rows) {
+      if (isFooter(r.text)) continue;
+      const m = r.text.match(DAY_RE);
+      if (m) { cur = { idx: DAY_IDX[norm(m[1])], num: m[2] ? Number(m[2]) : null, header: m[3] || '', body: [] }; days.push(cur); continue; }
+      (cur ? cur.body : preamble).push(r.text);
+    }
+  }
+
   const notes = [];
   const sessions = [];
   for (const d of days) {
-    const list = parseDayHeader(d.header);
+    const list = cols ? parseDisciplines(d.disc) : parseDayHeader(d.header);
     parseDayBody(d.body, list, notes);
     list.forEach(s => sessions.push({ day: d.idx, ...s }));
   }
-  const titleLine = preamble.find(l => /semana/i.test(l)) || '';
-  const title = (titleLine.split(':')[0] || '').trim();
-  const subtitle = titleLine.includes('|') ? titleLine.split('|').pop().trim() : '';
+
+  // Encabezado: título, atleta, bici y ritmos objetivo.
+  const pre = preamble.join(' ');
+  const titleLine = preamble.find(l => l !== l.toUpperCase()) || '';
+  let title = titleLine.split('|')[0].trim();
+  if (/:\s*semana/i.test(title)) title = title.split(':')[0].trim();
+  const athlete = (pre.match(/atleta:\s*([^|]+?)\s*(?:\||semana|$)/i) || [])[1];
+  const bike = (pre.match(/bici(?:cleta)?:\s*([^(|,]+?)\s*(?:\(|\||,|ritmos|$)/i) || [])[1];
+  const paces = [
+    ['Nado', /nado\s*([\d:.\-–]+\s*\/\s*100\s*m)/i],
+    ['Bici', /bici\s*(\d+(?:[.,]\d+)?\s*km\/h)/i],
+    ['Trote', /(?:trote|carrera|run)\s*([\d:.\-–]+\s*\/\s*km)/i]
+  ].map(([k, re]) => { const m = pre.match(re); return m ? `${k} ${m[1].replace(/\s+/g, '')}` : null; }).filter(Boolean);
+  if (paces.length) notes.unshift({ title: 'Ritmos objetivo', text: paces.join(' · ') });
+
   const lastStart = allWeeks().map(w => w.start).sort().pop();
-  return {
-    start: findWeekStart(lines, days) || (lastStart ? addDays(lastStart, 7) : mondayOf(todayISO())),
-    title: title && !/^semana del/i.test(title) ? title : 'Semana importada',
-    subtitle,
+  const week = {
+    start: findWeekStart(rows.map(r => r.text).join(' '), days) || (lastStart ? addDays(lastStart, 7) : mondayOf(todayISO())),
+    title: title || 'Semana importada',
     notes: notes.filter(n => n.text),
     sessions
   };
+  return personalize(week, { athlete, bike });
+}
+
+// Reemplaza el nombre del atleta y la bici que vienen en el PDF por los del perfil.
+function personalize(week, { athlete, bike }) {
+  const c = state.config;
+  const swaps = [];
+  if (athlete && c.name && norm(athlete) !== norm(c.name)) swaps.push([new RegExp(`\\b${escRe(athlete.trim())}\\b`, 'gi'), c.name]);
+  if (bike && c.bike && norm(bike) !== norm(c.bike)) swaps.push([new RegExp(escRe(bike.trim()), 'gi'), c.bike]);
+  if (!swaps.length) return week;
+  const fix = s => swaps.reduce((t, [re, v]) => t.replace(re, v), s || '');
+  week.title = fix(week.title);
+  week.notes.forEach(n => { n.title = fix(n.title); n.text = fix(n.text); });
+  week.sessions.forEach(s => { s.title = fix(s.title); s.blocks.forEach(b => { b.label = fix(b.label); b.text = fix(b.text); }); });
+  return week;
 }
 
 async function handlePdf(file) {
   toast('📄 Leyendo PDF…');
   try {
-    const week = parsePlanText(await pdfToLines(file));
+    const week = parsePlanRows(await pdfToRows(file));
     if (!week.sessions.length) throw new Error('No encontré días con sesiones (Lunes, Martes…) en el PDF.');
-    pendingImport = week;
-    showImportPreview();
+    openWeekEditor(week, 'import');
   } catch (err) {
     openModal(`
       <div class="modal-head"><h2>No pude leer el PDF</h2><button class="icon-btn" data-act="close">✕</button></div>
@@ -1277,6 +1431,24 @@ async function handlePdf(file) {
       <p class="small muted">Si tu PDF tiene otro formato, andá a <b>Ajustes → Otras opciones</b>: copiá el prompt, pegalo en ChatGPT o Claude junto con el PDF, y pegá el resultado en la app.</p>
       <button class="btn" style="width:100%" data-act="close">Entendido</button>`);
   }
+}
+
+/* ---------------- Editor de semana (al importar o para corregir una cargada) ---------------- */
+let editorMode = 'import';
+const blocksToText = blocks => (blocks || []).map(b => b.label ? `${b.label}: ${b.text}` : b.text).join('\n');
+const textToBlocks = txt => txt.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+  const m = l.match(/^([^:\d][^:]{0,44}):\s*(.*)$/);
+  return m ? { label: m[1].trim(), text: m[2].trim() } : { label: '', text: l };
+});
+const newUid = () => Math.random().toString(36).slice(2, 8);
+
+function openWeekEditor(week, mode) {
+  editorMode = mode;
+  pendingImport = structuredClone(week);
+  delete pendingImport.source;
+  pendingImport.notes = pendingImport.notes || [];
+  pendingImport.sessions.forEach((s, i) => { if (s.uid === undefined) s.uid = mode === 'edit' ? String(i) : newUid(); });
+  showImportPreview();
 }
 
 function syncImportInputs() {
@@ -1290,20 +1462,29 @@ function syncImportInputs() {
     s.day = Number(row.querySelector('[name=day]').value);
     s.sport = row.querySelector('[name=sport]').value;
     s.title = row.querySelector('[name=title]').value;
-    s.duration = Number(row.querySelector('[name=duration]').value) || 0;
+    const dur = Number(row.querySelector('[name=duration]').value) || 0;
+    if (dur !== s.duration) delete s.durationLabel;
+    s.duration = dur;
+    s.blocks = textToBlocks(row.querySelector('[name=blocks]').value);
+  });
+  document.querySelectorAll('[data-imp-note]').forEach(row => {
+    const n = pendingImport.notes[Number(row.dataset.impNote)];
+    n.title = row.querySelector('[name=ntitle]').value;
+    n.text = row.querySelector('[name=ntext]').value;
   });
 }
 
 function showImportPreview() {
   const w = pendingImport;
   const start = mondayOf(w.start);
-  const exists = allWeeks().some(x => x.start === start);
+  const exists = editorMode === 'import' && allWeeks().some(x => x.start === start);
   const order = w.sessions.map((s, i) => i).sort((a, b) => w.sessions[a].day - w.sessions[b].day);
   const totals = {};
   w.sessions.forEach(s => { totals[s.sport] = (totals[s.sport] || 0) + s.duration; });
+  const scroll = $modalBody.scrollTop;
   openModal(`
-    <div class="modal-head"><h2>Revisá la semana</h2><button class="icon-btn" data-act="close">✕</button></div>
-    <p class="small muted" style="margin-top:0">Esto es lo que entendí del PDF. Corregí lo que haga falta y guardala.</p>
+    <div class="modal-head"><h2>${editorMode === 'import' ? 'Revisá la semana' : 'Editar semana'}</h2><button class="icon-btn" data-act="close">✕</button></div>
+    <p class="small muted" style="margin-top:0">${editorMode === 'import' ? 'Esto es lo que entendí del PDF. Podés corregir todo antes de guardarla.' : 'Cambiá lo que quieras y guardá.'}</p>
     <div class="settings">
       <div class="grid-2">
         <label class="field">Lunes de la semana<input type="date" id="imp-start" value="${esc(start)}"></label>
@@ -1311,11 +1492,12 @@ function showImportPreview() {
       </div>
     </div>
     <p class="small muted" style="margin:4px 0 10px">${fmtShort(start)} – ${fmtShort(addDays(start, 6))} · ${w.sessions.length} sesiones · ${Object.entries(totals).map(([k, v]) => `${SPORTS[k]?.emoji || ''} ${fmtMin(v)}`).join(' · ')}</p>
-    ${exists ? `<div class="alert" style="margin-bottom:12px"><span>⚠️</span><div class="small">Ya hay un plan cargado para esa semana: se va a reemplazar por este.</div></div>` : ''}
+    ${exists ? `<div class="alert" style="margin-bottom:12px"><span>⚠️</span><div class="small">Ya hay un plan cargado para esa semana: se va a reemplazar por este (no se duplica).</div></div>` : ''}
     <div class="stack">
       ${order.map(i => {
         const s = w.sessions[i];
         const sp = SPORTS[s.sport] || SPORTS.other;
+        const txt = blocksToText(s.blocks);
         return `<div class="card imp-row" data-imp-row="${i}" style="border-left:5px solid ${sp.color}">
           <div class="imp-grid">
             <select name="day" aria-label="Día">${DAY_NAMES.map((d, j) => `<option value="${j}" ${j === s.day ? 'selected' : ''}>${d}</option>`).join('')}</select>
@@ -1324,18 +1506,28 @@ function showImportPreview() {
             <input name="title" value="${esc(s.title)}" aria-label="Título" class="imp-title">
             <button class="icon-btn imp-del" data-act="imp-del" data-i="${i}" aria-label="Quitar sesión">✕</button>
           </div>
-          ${s.blocks.length ? `<details style="margin-top:8px"><summary class="small muted" style="cursor:pointer">${s.blocks.length} bloque${s.blocks.length > 1 ? 's' : ''} de detalle</summary>
-            ${s.blocks.map(b => `<div class="small" style="margin-top:6px"><b>${esc(b.label)}:</b> ${esc(b.text)}</div>`).join('')}
-          </details>` : ''}
+          <details style="margin-top:8px" ${!txt ? 'open' : ''}><summary class="small muted" style="cursor:pointer">Detalle ${s.blocks.length ? `(${s.blocks.length} bloque${s.blocks.length > 1 ? 's' : ''})` : ''} · editable</summary>
+            <textarea name="blocks" class="imp-text" rows="${Math.min(12, Math.max(3, txt.split('\n').length + 1))}" placeholder="Calentamiento: 400 m suaves&#10;Principal: …&#10;Afloje: …">${esc(txt)}</textarea>
+            <div class="small muted" style="margin-top:4px">Una línea por bloque, con el formato <b>Título: texto</b>.</div>
+          </details>
         </div>`;
       }).join('')}
     </div>
-    ${w.notes.length ? `<div class="section-title" style="margin-top:16px"><h3>Notas de la semana</h3></div>
-      ${w.notes.map(n => `<div class="alert info small" style="margin-bottom:8px"><span>📌</span><div><b>${esc(n.title)}</b><div>${esc(n.text)}</div></div></div>`).join('')}` : ''}
+    <button class="btn" style="width:100%;margin-top:10px" data-act="imp-add">＋ Agregar sesión</button>
+    <div class="section-title" style="margin-top:18px"><h3>Notas de la semana</h3><button class="btn sm ghost" data-act="imp-add-note">＋ Nota</button></div>
+    ${w.notes.map((n, i) => `<div class="card imp-row" data-imp-note="${i}" style="margin-bottom:8px">
+      <div class="imp-grid" style="grid-template-columns:1fr auto">
+        <input name="ntitle" value="${esc(n.title)}" placeholder="Título" class="imp-title" style="grid-column:1">
+        <button class="icon-btn imp-del" data-act="imp-del-note" data-i="${i}" aria-label="Quitar nota" style="width:40px">✕</button>
+      </div>
+      <textarea name="ntext" class="imp-text" rows="3" style="margin-top:6px">${esc(n.text)}</textarea>
+    </div>`).join('') || '<p class="small muted">Sin notas.</p>'}
     <div class="grid-2" style="margin-top:16px">
       <button class="btn" data-act="close">Cancelar</button>
       <button class="btn primary" data-act="imp-save">Guardar semana</button>
-    </div>`);
+    </div>
+    ${editorMode === 'edit' && state.weeks.some(x => x.start === start) ? `<button class="btn sm danger" style="width:100%;margin-top:10px" data-act="imp-delete-week">Eliminar el plan de esta semana</button>` : ''}`);
+  $modalBody.scrollTop = scroll;
 }
 
 function savePendingImport() {
@@ -1344,15 +1536,27 @@ function savePendingImport() {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(w.start)) { toast('Elegí la fecha del lunes'); return; }
   w.start = mondayOf(w.start);
   w.sessions.sort((a, b) => a.day - b.day);
+  w.notes = w.notes.filter(n => n.title.trim() || n.text.trim());
+  // Si reemplaza una semana existente, cada sesión hereda el id de la anterior del mismo día y deporte
+  // para que no se pierdan los registros ya cargados.
+  const prev = weekMeta(w.start);
+  if (editorMode === 'import' && prev) {
+    const old = prev.sessions.map((s, i) => ({ uid: s.uid ?? String(i), day: s.day, sport: s.sport }));
+    w.sessions.forEach(s => {
+      const k = old.findIndex(o => o.day === s.day && o.sport === s.sport);
+      if (k >= 0) { s.uid = old[k].uid; old.splice(k, 1); }
+    });
+  }
   state.weeks = state.weeks.filter(x => x.start !== w.start).concat(w);
+  const imported = editorMode === 'import';
   pendingImport = null;
   invalidate(); save();
   weekCursor = w.start;
   tab = 'week';
   closeModal();
   window.scrollTo(0, 0);
-  confetti();
-  toast(`✅ Semana del ${fmtShort(w.start)} cargada`);
+  if (imported) confetti();
+  toast(imported ? `✅ Semana del ${fmtShort(w.start)} cargada` : '✅ Semana actualizada');
 }
 
 function exportBackup() {
@@ -1395,6 +1599,20 @@ let lastDay = todayISO();
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && todayISO() !== lastDay) { lastDay = todayISO(); weekCursor = mondayOf(lastDay); render(); }
 });
+
+// Link de perfil: ?atleta=…&altura=…&peso=…&bici=… carga esos datos una vez y limpia la URL.
+(function applyProfileLink() {
+  const q = new URLSearchParams(location.search);
+  const map = { atleta: 'name', altura: 'height', peso: 'weight', bici: 'bike' };
+  let changed = false;
+  for (const [param, key] of Object.entries(map)) {
+    if (q.has(param)) { state.config[key] = q.get(param).trim(); changed = true; }
+  }
+  if (!changed) return;
+  save();
+  history.replaceState(null, '', location.pathname);
+  setTimeout(() => toast('👤 Perfil de atleta actualizado'), 300);
+})();
 
 render();
 if (!state.config.onboarded) showOnboarding();

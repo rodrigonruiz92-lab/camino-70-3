@@ -1,5 +1,5 @@
 // Cache-first para que la app funcione sin conexión. Subí VERSION al cambiar archivos.
-const VERSION = 'v2';
+const VERSION = 'v3';
 const CACHE = `tri703-${VERSION}`;
 const ASSETS = [
   './', 'index.html', 'styles.css', 'app.js', 'plan.js', 'manifest.webmanifest',
